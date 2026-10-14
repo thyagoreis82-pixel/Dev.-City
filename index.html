@@ -802,6 +802,8 @@ const LV = {
 const nomeEquipe = "Time DevCity";
 let caselScore = { aut: 100, ges: 100, soc: 100, rel: 100, dec: 100 };
 let totalErros = 0;
+let acertosSeguidos = 0; // sequência de respostas corretas (recuperação gradual)
+let vehicleRepairs = 0;  // níveis de dano já recuperados (abatidos do nível calculado)
 let vehicleDamageLevel = 0; // 0: Intacto (100-76%), 1: Leve, 2: Moderado/Crítico, 3: Burnout total
 let inBurnout = false;
 let maxSpeed = 24;
@@ -1108,9 +1110,11 @@ const mirrorStalk = lam(0x48414e), mirrorCap = new W.MeshBasicMaterial({ color: 
 
 // Faróis e Rodas
 const hlMat = new W.MeshBasicMaterial({ color: 0xfffae0 });
+const carHeadlightMeshes = [];
 [[-0.68, 0.8, 1.92], [0.68, 0.8, 1.92]].forEach(p => {
   const hl = new W.Mesh(new W.BoxGeometry(0.38, 0.24, 0.1), hlMat);
   hl.position.set(p[0], p[1], p[2]); car.add(hl);
+  carHeadlightMeshes.push(hl);
 });
 const wheelMat = lam(0x2d2b33);
 [[-1.12, 1.3], [1.12, 1.3], [-1.12, -1.3], [1.12, -1.3]].forEach(p => {
@@ -1120,11 +1124,13 @@ const wheelMat = lam(0x2d2b33);
 
 // Feixe luminoso no asfalto
 const beamMesh = new W.Mesh(new W.PlaneGeometry(10, 18), new W.MeshBasicMaterial({
-  map: makeBeamTex(), transparent: true, depthWrite: false, opacity: 0.88
+  map: makeBeamTex(), transparent: true, depthWrite: false, opacity: 0.88,
+  blending: W.AdditiveBlending // aditivo: só soma luz amarela, nunca escurece (sem franjas pretas)
 }));
-beamMesh.rotation.x = -Math.PI / 2; beamMesh.position.set(0, 0.07, 10); car.add(beamMesh);
+// y acima do topo do asfalto (0.10), senão o feixe fica escondido sob a rua
+beamMesh.rotation.x = -Math.PI / 2; beamMesh.position.set(0, 0.12, 10); car.add(beamMesh);
 
-const carLight = new W.PointLight(0xfff5d0, 1.2, 28);
+const carLight = new W.PointLight(0xffe8a0, 1.2, 28);
 carLight.position.set(0, 1.5, 4); car.add(carLight);
 
 scene.add(car);
@@ -1133,6 +1139,8 @@ function restoreCarVisuals() {
   carBodyMesh.material = carBodyMat;
   carRoofMesh.material = carBodyMat;
   carCabinMesh.material = carCabinMat;
+  carHeadlightMeshes.forEach(hl => { hl.material = hlMat; });
+  beamMesh.visible = true;
 }
 
 /* Partículas de Fumaça, Faíscas e Explosão (Itens 2 e 5) */
@@ -1351,6 +1359,13 @@ function updateVehicleHealth() {
     maxSpeed = 24;
   }
 
+  // Recuperação gradual: abate os níveis reparados do nível calculado (burnout nunca é abatido)
+  if (vehicleDamageLevel < 3 && vehicleRepairs > 0) {
+    vehicleRepairs = Math.min(vehicleRepairs, vehicleDamageLevel);
+    vehicleDamageLevel -= vehicleRepairs;
+    maxSpeed = [24, 19, 14][vehicleDamageLevel];
+  }
+
   // Atualiza etiqueta do veículo no HUD
   const tag = $('veh-tag');
   if (vehicleDamageLevel === 0) {
@@ -1395,6 +1410,8 @@ function updateHUD() {
 function resetGame() {
   caselScore = { aut: 100, ges: 100, soc: 100, rel: 100, dec: 100 };
   totalErros = 0;
+  acertosSeguidos = 0;
+  vehicleRepairs = 0;
   vehicleDamageLevel = 0;
   inBurnout = false;
   maxSpeed = 24;
@@ -1504,6 +1521,7 @@ function openDilemma(e) {
 
 // 8.5 Escolha e Aplicação Acelerada de Dano (Item 2 e Item 5)
 function pickOption(idx) {
+  if (state !== 'modal' || stage !== 'q' || !cur) return; // só conta resposta única e válida
   const opt = cur.o[idx];
   const primaryFx = opt.fx[cur.k] || 0;
   const isBad = primaryFx <= 0;
@@ -1523,6 +1541,17 @@ function pickOption(idx) {
   }
 
   updateHUD();
+
+  // Recuperação gradual: 2 acertos consecutivos devolvem 1 nível; erro zera a sequência
+  if (isBad) {
+    acertosSeguidos = 0;
+  } else if (++acertosSeguidos >= 2) {
+    acertosSeguidos = 0;
+    if (vehicleDamageLevel > 0 && vehicleDamageLevel < 3) {
+      vehicleRepairs++;
+      updateHUD();
+    }
+  }
   sfx(!isBad);
 
   // Se o erro culminou em Burnout, executa animação de tragédia e explosão imediata (Item 5)
@@ -1577,10 +1606,11 @@ function triggerCarExplosion() {
 
   // Carro carbonizado
   car.traverse(obj => {
-    if (obj.isMesh && obj !== plate) {
+    if (obj.isMesh && obj !== plate && obj !== beamMesh) {
       obj.material = new W.MeshLambertMaterial({ color: 0x18181c });
     }
   });
+  beamMesh.visible = false; // farol apagado na explosão (antes virava um retângulo preto)
 
   // Explosão massiva de partículas em 3D
   for (let i = 0; i < 75; i++) {
@@ -1800,11 +1830,11 @@ function drawMap(t) {
       c.strokeRect(left + 1, top + 1, blockSize - 2, blockSize - 2);
 
       if (objective) {
-        c.fillStyle = objective.done ? '#d1d5db' : '#ffffff';
+        c.fillStyle = objective.done ? '#9ca3af' : '#ffffff';
         c.font = 'bold ' + Math.max(12, Math.round(blockSize * 0.6)) + 'px Arial, sans-serif';
         c.textAlign = 'center';
         c.textBaseline = 'middle';
-        c.fillText('?', X(bx), X(bz));
+        c.fillText(objective.done ? '\u2713' : '?', X(bx), X(bz));
       }
     }
   }
